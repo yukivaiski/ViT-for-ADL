@@ -147,7 +147,9 @@ class ProjectInOut(nn.Module):
             - after calling fn, the tensor has to be projected back into it's original shape   
             - fn(W_in) * W_out
         """
-        # TODO
+        x = self.project_in(x)
+        x = self.fn(x, *args, **kwargs)
+        x = self.project_out(x)
         return x
 
 
@@ -158,7 +160,6 @@ class CrossTransformer(nn.Module):
     def __init__(self, sm_dim, lg_dim, depth, heads, dim_head, dropout):
         super().__init__()
         self.layers = nn.ModuleList([])
-        # TODO: create # depth encoders using ProjectInOut
         inner_dim = dim_head * heads
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
@@ -177,10 +178,16 @@ class CrossTransformer(nn.Module):
         # cross attend to 
         # 1. small cls token to large patches and
         # 2. large cls token to small patches
-        # TODO
+        for sm_attn, lg_attn in self.layers:
+            # 1. Small CLS attends to Large patches
+            sm_cls = sm_cls + sm_attn(sm_cls, context=lg_patch_tokens, kv_include_self=True)
 
-        # finally concat sm/lg cls tokens with patch tokens 
-        # TODO
+            # 2. Large CLS attends to Small patches
+            lg_cls = lg_cls + lg_attn(lg_cls, context=sm_patch_tokens, kv_include_self=True)
+
+        # finally concat sm/lg cls tokens with patch tokens
+        sm_tokens = torch.cat((sm_cls, sm_patch_tokens), dim=1)
+        lg_tokens = torch.cat((lg_cls, lg_patch_tokens), dim=1)
         return sm_tokens, lg_tokens
 
 
