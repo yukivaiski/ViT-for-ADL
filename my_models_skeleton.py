@@ -156,56 +156,47 @@ class ProjectInOut(nn.Module):
 # cross attention transformer
 class CrossTransformer(nn.Module):
 
-    def __init__(self, sm_dim, lg_dim, depth, heads,
-                 dim_head, dropout):
-
+    def __init__(self, sm_dim, lg_dim, depth, heads, dropout):
         super().__init__()
 
         self.layers = nn.ModuleList([])
 
-        inner_dim = heads * dim_head
-
         for _ in range(depth):
-
             self.layers.append(nn.ModuleList([
 
-                # Small CLS attends to large patches
+                # Small CLS -> large embedding space
                 ProjectInOut(
                     sm_dim,
-                    inner_dim,
+                    lg_dim,
                     PreNorm(
-                        inner_dim,
+                        lg_dim,
                         Attention(
-                            inner_dim,
+                            lg_dim,
                             heads=heads,
-                            dim_head=dim_head,
+                            dim_head=lg_dim // heads,
                             dropout=dropout
                         )
                     )
                 ),
 
-                # Large CLS attends to small patches
+                # Large CLS -> small embedding space
                 ProjectInOut(
                     lg_dim,
-                    inner_dim,
+                    sm_dim,
                     PreNorm(
-                        inner_dim,
+                        sm_dim,
                         Attention(
-                            inner_dim,
+                            sm_dim,
                             heads=heads,
-                            dim_head=dim_head,
+                            dim_head=sm_dim // heads,
                             dropout=dropout
                         )
                     )
-                ),
-
-                # Project large patches: lg_dim -> inner_dim
-                nn.Linear(lg_dim, inner_dim),
-
-                # Project small patches: sm_dim -> inner_dim
-                nn.Linear(sm_dim, inner_dim)
+                )
 
             ]))
+
+        # No positional FFN here
 
     def forward(self, sm_tokens, lg_tokens):
 
@@ -214,23 +205,19 @@ class CrossTransformer(nn.Module):
             (sm_tokens, lg_tokens)
         )
 
-        for sm_attn, lg_attn, lg_proj, sm_proj in self.layers:
+        for sm_attn, lg_attn in self.layers:
 
             # Small CLS attends to large patches
-            lg_context = lg_proj(lg_patch_tokens)
-
             sm_cls = sm_cls + sm_attn(
                 sm_cls,
-                context=lg_context,
+                context=lg_patch_tokens,
                 kv_include_self=True
             )
 
             # Large CLS attends to small patches
-            sm_context = sm_proj(sm_patch_tokens)
-
             lg_cls = lg_cls + lg_attn(
                 lg_cls,
-                context=sm_context,
+                context=sm_patch_tokens,
                 kv_include_self=True
             )
 
@@ -269,7 +256,6 @@ class MultiScaleEncoder(nn.Module):
                     lg_dim=lg_dim,
                     depth=cross_attn_depth,
                     heads=cross_attn_heads,
-                    dim_head=cross_attn_dim_head,
                     dropout=dropout
                 )
             ]))
