@@ -125,74 +125,125 @@ class Transformer(nn.Module):
 # CrossViT
 # projecting CLS tokens, in the case that small and large patch tokens have different dimensions
 class ProjectInOut(nn.Module):
-    """
-    Adapter class that embeds a callable (layer) and handles mismatching dimensions
-    """
 
-    def __init__(self, dim_outer, dim_inner, fn):
-        """
-        Args:
-            dim_outer (int): Input (and output) dimension.
-            dim_inner (int): Intermediate dimension (expected by fn).
-            fn (callable): A callable object (like a layer).
-        """
+    def __init__(self, dim_outer, dim_inner, context_dim, fn):
         super().__init__()
+
         self.fn = fn
-        need_projection = dim_outer != dim_inner
-        self.project_in = nn.Linear(dim_outer, dim_inner) if need_projection else nn.Identity()
-        self.project_out = nn.Linear(dim_inner, dim_outer) if need_projection else nn.Identity()
+
+        # Project input tokens to the common dimension
+        self.project_in = (
+            nn.Linear(dim_outer, dim_inner)
+            if dim_outer != dim_inner
+            else nn.Identity()
+        )
+
+        # Project context tokens to the common dimension
+        self.project_context = (
+            nn.Linear(context_dim, dim_inner)
+            if context_dim != dim_inner
+            else nn.Identity()
+        )
+
+        # Project output back to the original dimension
+        self.project_out = (
+            nn.Linear(dim_inner, dim_outer)
+            if dim_outer != dim_inner
+            else nn.Identity()
+        )
 
     def forward(self, x, *args, **kwargs):
-        """
-        Args:
-            *args, **kwargs: to be passed on to fn
 
-        Notes:
-            - after calling fn, the tensor has to be projected back into it's original shape   
-            - fn(W_in) * W_out
-        """
-
+        # Project input
         x = self.project_in(x)
+
+        # Project context if provided
+        if 'context' in kwargs and kwargs['context'] is not None:
+            kwargs['context'] = self.project_context(kwargs['context'])
+
+        # Apply the attention function
         x = self.fn(x, *args, **kwargs)
+
+        # Project output back to original dimension
         x = self.project_out(x)
+
         return x
 
 
 # CrossViT
 # cross attention transformer
 class CrossTransformer(nn.Module):
-    # This is a special transformer block
+
     def __init__(self, sm_dim, lg_dim, depth, heads, dim_head, dropout):
         super().__init__()
+
         self.layers = nn.ModuleList([])
+
         inner_dim = dim_head * heads
+
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                ProjectInOut(sm_dim, inner_dim,
-                             PreNorm(inner_dim, Attention(inner_dim, heads=heads, dim_head=dim_head, dropout=dropout))),
-                ProjectInOut(lg_dim, inner_dim,
-                             PreNorm(inner_dim, Attention(inner_dim, heads=heads, dim_head=dim_head, dropout=dropout)))
+
+                # Small CLS attends to large patches
+                ProjectInOut(
+                    dim_outer=sm_dim,
+                    dim_inner=inner_dim,
+                    context_dim=lg_dim,
+                    fn=PreNorm(
+                        inner_dim,
+                        Attention(
+                            inner_dim,
+                            heads=heads,
+                            dim_head=dim_head,
+                            dropout=dropout
+                        )
+                    )
+                ),
+
+                # Large CLS attends to small patches
+                ProjectInOut(
+                    dim_outer=lg_dim,
+                    dim_inner=inner_dim,
+                    context_dim=sm_dim,
+                    fn=PreNorm(
+                        inner_dim,
+                        Attention(
+                            inner_dim,
+                            heads=heads,
+                            dim_head=dim_head,
+                            dropout=dropout
+                        )
+                    )
+                )
+
             ]))
-        # Note: no positional FFN here 
 
     def forward(self, sm_tokens, lg_tokens):
-        (sm_cls, sm_patch_tokens), (lg_cls, lg_patch_tokens) = map(lambda t: (t[:, :1], t[:, 1:]),
-                                                                   (sm_tokens, lg_tokens))
 
-        # Forward pass through the layers, 
-        # cross attend to 
-        # 1. small cls token to large patches and
-        # 2. large cls token to small patches
+        (sm_cls, sm_patch_tokens), (lg_cls, lg_patch_tokens) = map(
+            lambda t: (t[:, :1], t[:, 1:]),
+            (sm_tokens, lg_tokens)
+        )
+
         for sm_attn, lg_attn in self.layers:
-            # 1. Small CLS attends to Large patches
-            sm_cls = sm_cls + sm_attn(sm_cls, context=lg_patch_tokens, kv_include_self=True)
 
-            # 2. Large CLS attends to Small patches
-            lg_cls = lg_cls + lg_attn(lg_cls, context=sm_patch_tokens, kv_include_self=True)
+            # Small CLS attends to large patches
+            sm_cls = sm_cls + sm_attn(
+                sm_cls,
+                context=lg_patch_tokens,
+                kv_include_self=True
+            )
 
-        # finally concat sm/lg cls tokens with patch tokens
+            # Large CLS attends to small patches
+            lg_cls = lg_cls + lg_attn(
+                lg_cls,
+                context=sm_patch_tokens,
+                kv_include_self=True
+            )
+
         sm_tokens = torch.cat((sm_cls, sm_patch_tokens), dim=1)
         lg_tokens = torch.cat((lg_cls, lg_patch_tokens), dim=1)
+
         return sm_tokens, lg_tokens
 
 
