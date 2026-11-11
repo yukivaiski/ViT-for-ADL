@@ -84,10 +84,14 @@ class Attention(nn.Module):
             # cross attention requires CLS token includes itself as key / value
             context = torch.cat((x, context), dim=1)
 
-        q, k, v = self.to_qkv(x).chunk(3, dim=-1)
-        q = q.reshape(b, n, h, -1).transpose(1, 2)  # split into multi-attention heads
-        k = k.reshape(b, n, h, -1).transpose(1, 2)
-        v = v.reshape(b, n, h, -1).transpose(1, 2)
+        # Queries (q) come from x (e.g., [CLS] token)
+        q = self.to_qkv(x).chunk(3, dim=-1)[0]
+        # Keys (k) and Values (v) come from context (e.g., patch tokens of the other branch)
+        k, v = self.to_qkv(context).chunk(3, dim=-1)[1:]
+
+        q = q.reshape(b, n, h, -1).transpose(1, 2)
+        k = k.reshape(b, k.shape[1], h, -1).transpose(1, 2)
+        v = v.reshape(b, v.shape[1], h, -1).transpose(1, 2)
 
         dot_attention = torch.matmul(q, k.transpose(-1, -2)) * self.scale
 
@@ -147,6 +151,7 @@ class ProjectInOut(nn.Module):
             - after calling fn, the tensor has to be projected back into it's original shape   
             - fn(W_in) * W_out
         """
+
         x = self.project_in(x)
         x = self.fn(x, *args, **kwargs)
         x = self.project_out(x)
@@ -211,12 +216,28 @@ class MultiScaleEncoder(nn.Module):
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                # 2 transformer branches, one for small, one for large patchs
-                # + 1 cross transformer block
+                Transformer(dim=sm_dim, **sm_enc_params, dropout=dropout),
+                # 2. Large branch transformer encoder
+                Transformer(dim=lg_dim, **lg_enc_params, dropout=dropout),
+                # 3. Cross-transformer block for communication
+                CrossTransformer(
+                    sm_dim=sm_dim,
+                    lg_dim=lg_dim,
+                    depth=cross_attn_depth,
+                    heads=cross_attn_heads,
+                    dim_head=cross_attn_dim_head,
+                    dropout=dropout
+                )
             ]))
 
     def forward(self, sm_tokens, lg_tokens):
-        # forward through the transformer encoders and cross attention block
+        for sm_enc, lg_enc, cross_attn in self.layers:
+            # Independent self-attention refinement
+            sm_tokens = sm_enc(sm_tokens)
+            lg_tokens = lg_enc(lg_tokens)
+
+            # Cross-scale communication (sharing information between [CLS] tokens and patches)
+            sm_tokens, lg_tokens = cross_attn(sm_tokens, lg_tokens)
         return sm_tokens, lg_tokens
 
 
@@ -412,12 +433,16 @@ class CrossViT(nn.Module):
 
 if __name__ == "__main__":
     x = torch.randn(16, 3, 32, 32)
-    vit = ViT(image_size=32, patch_size=8, num_classes=10, dim=64, depth=2, heads=8, mlp_dim=128, dropout=0.1,
-              emb_dropout=0.1)
+
+    #vit = ViT(image_size=32, patch_size=8, num_classes=10, dim=64, depth=2, heads=8, mlp_dim=128, dropout=0.1,
+    #          emb_dropout=0.1)
+
     cvit = CrossViT(image_size=32, num_classes=10, sm_dim=64, lg_dim=128, sm_patch_size=8,
                     sm_enc_depth=2, sm_enc_heads=8, sm_enc_mlp_dim=128, sm_enc_dim_head=64,
                     lg_patch_size=16, lg_enc_depth=2, lg_enc_heads=8, lg_enc_mlp_dim=128,
                     lg_enc_dim_head=64, cross_attn_depth=2, cross_attn_heads=8, cross_attn_dim_head=64,
                     depth=3, dropout=0.1, emb_dropout=0.1)
-    print(vit(x).shape)
-    #print(cvit(x).shape)
+
+    #print(vit(x).shape)
+
+    print(cvit(x).shape)
