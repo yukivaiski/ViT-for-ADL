@@ -126,45 +126,27 @@ class Transformer(nn.Module):
 # projecting CLS tokens, in the case that small and large patch tokens have different dimensions
 class ProjectInOut(nn.Module):
 
-    def __init__(self, dim_outer, dim_inner, context_dim, fn):
+    def __init__(self, dim_outer, dim_inner, fn):
         super().__init__()
 
         self.fn = fn
 
-        # Project input tokens to the common dimension
+        need_projection = dim_outer != dim_inner
+
         self.project_in = (
             nn.Linear(dim_outer, dim_inner)
-            if dim_outer != dim_inner
-            else nn.Identity()
+            if need_projection else nn.Identity()
         )
 
-        # Project context tokens to the common dimension
-        self.project_context = (
-            nn.Linear(context_dim, dim_inner)
-            if context_dim != dim_inner
-            else nn.Identity()
-        )
-
-        # Project output back to the original dimension
         self.project_out = (
             nn.Linear(dim_inner, dim_outer)
-            if dim_outer != dim_inner
-            else nn.Identity()
+            if need_projection else nn.Identity()
         )
 
     def forward(self, x, *args, **kwargs):
 
-        # Project input
         x = self.project_in(x)
-
-        # Project context if provided
-        if 'context' in kwargs and kwargs['context'] is not None:
-            kwargs['context'] = self.project_context(kwargs['context'])
-
-        # Apply the attention function
         x = self.fn(x, *args, **kwargs)
-
-        # Project output back to original dimension
         x = self.project_out(x)
 
         return x
@@ -174,22 +156,24 @@ class ProjectInOut(nn.Module):
 # cross attention transformer
 class CrossTransformer(nn.Module):
 
-    def __init__(self, sm_dim, lg_dim, depth, heads, dim_head, dropout):
+    def __init__(self, sm_dim, lg_dim, depth, heads,
+                 dim_head, dropout):
+
         super().__init__()
 
         self.layers = nn.ModuleList([])
 
-        inner_dim = dim_head * heads
+        inner_dim = heads * dim_head
 
         for _ in range(depth):
+
             self.layers.append(nn.ModuleList([
 
                 # Small CLS attends to large patches
                 ProjectInOut(
-                    dim_outer=sm_dim,
-                    dim_inner=inner_dim,
-                    context_dim=lg_dim,
-                    fn=PreNorm(
+                    sm_dim,
+                    inner_dim,
+                    PreNorm(
                         inner_dim,
                         Attention(
                             inner_dim,
@@ -202,10 +186,9 @@ class CrossTransformer(nn.Module):
 
                 # Large CLS attends to small patches
                 ProjectInOut(
-                    dim_outer=lg_dim,
-                    dim_inner=inner_dim,
-                    context_dim=sm_dim,
-                    fn=PreNorm(
+                    lg_dim,
+                    inner_dim,
+                    PreNorm(
                         inner_dim,
                         Attention(
                             inner_dim,
@@ -214,7 +197,13 @@ class CrossTransformer(nn.Module):
                             dropout=dropout
                         )
                     )
-                )
+                ),
+
+                # Project large patches: lg_dim -> inner_dim
+                nn.Linear(lg_dim, inner_dim),
+
+                # Project small patches: sm_dim -> inner_dim
+                nn.Linear(sm_dim, inner_dim)
 
             ]))
 
@@ -225,19 +214,23 @@ class CrossTransformer(nn.Module):
             (sm_tokens, lg_tokens)
         )
 
-        for sm_attn, lg_attn in self.layers:
+        for sm_attn, lg_attn, lg_proj, sm_proj in self.layers:
 
             # Small CLS attends to large patches
+            lg_context = lg_proj(lg_patch_tokens)
+
             sm_cls = sm_cls + sm_attn(
                 sm_cls,
-                context=lg_patch_tokens,
+                context=lg_context,
                 kv_include_self=True
             )
 
             # Large CLS attends to small patches
+            sm_context = sm_proj(sm_patch_tokens)
+
             lg_cls = lg_cls + lg_attn(
                 lg_cls,
-                context=sm_patch_tokens,
+                context=sm_context,
                 kv_include_self=True
             )
 
