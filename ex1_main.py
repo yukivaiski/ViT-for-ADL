@@ -126,7 +126,10 @@ def run(args):
     device = get_device()    
     model.to(device)
     
-    optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
+    #optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
+
+    # trying different optimizer
+    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
 
     if args.model == "r18":
         scheduler = optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.01, total_iters=args.epochs)
