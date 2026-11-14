@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from torch import optim
 import os
 
-from my_models import ViT, CrossViT   # rename the skeleton file for your implementation / comment before testing for ResNet
+from my_models_skeleton import ViT, CrossViT   # rename the skeleton file for your implementation / comment before testing for ResNet
 
 
 def parse_args():
