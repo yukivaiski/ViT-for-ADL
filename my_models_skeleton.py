@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
+from torch import nn, einsum
 
 
 # ViT
@@ -62,6 +63,8 @@ class Attention(nn.Module):
 
         # as well as the q linear layer
         self.to_qkv = nn.Linear(dim, total_dim * 3, bias=False)
+        self.to_q = nn.Linear(dim, total_dim, bias=False)  # separate for cross-a
+        self.to_kv = nn.Linear(dim, total_dim * 2, bias=False)
 
         # and the k/v linear layer (can be realized as one single linear layer
         # or as two individual ones)
@@ -79,17 +82,23 @@ class Attention(nn.Module):
         # the output should be in the shape 'b n (h d)'
         b, n, _, h = *x.shape, self.heads
 
-        if context is None:
+        if context is None:  # separate for s-a and cross-a
             context = x
+            q, k, v = self.to_qkv(x).chunk(3, dim=-1)
+        else:
+            q = self.to_q(x)
+            k, v = self.to_kv(context).chunk(2, dim=-1)
 
         if kv_include_self:
             # cross attention requires CLS token includes itself as key / value
             context = torch.cat((x, context), dim=1)
 
-        # Queries (q) come from x (e.g., [CLS] token)
-        q = self.to_qkv(x).chunk(3, dim=-1)[0]
-        # Keys (k) and Values (v) come from context (e.g., patch tokens of the other branch)
-        k, v = self.to_qkv(context).chunk(3, dim=-1)[1:]
+        q = q.reshape(b, n, h, -1).transpose(1, 2)  # split into multi-attention heads
+        nk = k.shape[1]
+        nv = v.shape[1]
+
+        k = k.reshape(b, nk, h, -1).transpose(1, 2)
+        v = v.reshape(b, nv, h, -1).transpose(1, 2)
 
         q = q.reshape(b, n, h, -1).transpose(1, 2)
         k = k.reshape(b, k.shape[1], h, -1).transpose(1, 2)
@@ -116,12 +125,13 @@ class Transformer(nn.Module):
                 PreNorm(dim, Attention(dim, heads=heads, dim_head=dim_head, dropout=dropout)),
                 PreNorm(dim, FeedForward(dim, mlp_dim, dropout=dropout))
             ]))
+        self.norm = nn.LayerNorm(dim)  # add final layernorm like usual transformers do
 
     def forward(self, x):
         for attn, ff in self.layers:
             x = attn(x) + x
             x = ff(x) + x
-        return x
+        return self.norm(x)
 
 
 # CrossViT
@@ -214,7 +224,6 @@ class CrossTransformer(nn.Module):
         )
 
         for sm_attn, lg_attn in self.layers:
-
             # Small CLS attends to large patches
             sm_cls = sm_cls + sm_attn(
                 sm_cls,
@@ -482,8 +491,8 @@ class CrossViT(nn.Module):
 if __name__ == "__main__":
     x = torch.randn(16, 3, 32, 32)
 
-    #vit = ViT(image_size=32, patch_size=8, num_classes=10, dim=64, depth=2, heads=8, mlp_dim=128, dropout=0.1,
-    #          emb_dropout=0.1)
+    vit = ViT(image_size=32, patch_size=8, num_classes=10, dim=64, depth=2, heads=8, mlp_dim=128, dropout=0.1,
+              emb_dropout=0.1)
 
     cvit = CrossViT(image_size=32, num_classes=10, sm_dim=64, lg_dim=128, sm_patch_size=8,
                     sm_enc_depth=2, sm_enc_heads=8, sm_enc_mlp_dim=128, sm_enc_dim_head=64,
@@ -491,6 +500,5 @@ if __name__ == "__main__":
                     lg_enc_dim_head=64, cross_attn_depth=2, cross_attn_heads=8, cross_attn_dim_head=64,
                     depth=3, dropout=0.1, emb_dropout=0.1)
 
-    #print(vit(x).shape)
-
+    print(vit(x).shape)
     print(cvit(x).shape)

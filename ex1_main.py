@@ -1,12 +1,14 @@
 import argparse
-import torch
-from torch import nn
-from torchvision import datasets, transforms, models
-from torch.utils.data import DataLoader
-from torch import optim
 import os
 
-from my_models_skeleton import ViT, CrossViT   # rename the skeleton file for your implementation / comment before testing for ResNet
+import torch
+from torch import nn
+from torch import optim
+from torch.utils.data import DataLoader, Subset
+from torchvision import datasets, transforms, models
+
+from my_models_skeleton import ViT, \
+    CrossViT  # rename the skeleton file for your implementation / comment before testing for ResNet
 
 
 def parse_args():
@@ -18,10 +20,12 @@ def parse_args():
     parser.add_argument('--momentum', type=float, default=0.9, help='SGD momentum (default: 0.9)')
     parser.add_argument('--no-cuda', action='store_true', default=False, help='disables CUDA training')
     parser.add_argument('--seed', type=int, default=1, help='random seed (default: 1)')
-    parser.add_argument('--log-interval', type=int, default=10, help='how many batches to wait before logging training status')
+    parser.add_argument('--log-interval', type=int, default=10,
+                        help='how many batches to wait before logging training status')
     parser.add_argument('--save-model', action='store_true', default=True, help='For Saving the current Model')
     parser.add_argument('--dry-run', action='store_true', default=False, help='quickly check a single pass')
     return parser.parse_args()
+
 
 def train(model, trainloader, optimizer, criterion, device, epoch):
     model.train()
@@ -29,7 +33,7 @@ def train(model, trainloader, optimizer, criterion, device, epoch):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
         output = model(data)
-        loss = criterion(output, target)/len(output)
+        loss = criterion(output, target) / len(output)
         loss.backward()
         optimizer.step()
         if batch_idx % args.log_interval == 0:
@@ -38,6 +42,7 @@ def train(model, trainloader, optimizer, criterion, device, epoch):
                        100. * batch_idx / len(trainloader), loss.item()))
             if args.dry_run:
                 break
+
 
 def test(model, device, test_loader, criterion, set="Test"):
     model.eval()
@@ -62,74 +67,98 @@ def test(model, device, test_loader, criterion, set="Test"):
 
 def run(args):
     mean = (0.4914, 0.4822, 0.4465)
-    std  = (0.2470, 0.2435, 0.2616)
+    std = (0.2470, 0.2435, 0.2616)
 
-    # Download and load the training data
-    transform = transforms.Compose([transforms.ToTensor(),
-                                    # ImageNet mean/std values should also fit okayish for CIFAR
-									transforms.Normalize(mean=mean, std=std )
-                                    ])
-
-    # TODO: adjust folder
-    augmentations = transforms.Compose([transforms.RandomCrop(32, padding=4),
+    # use random crop with padding, so ouput image is still 32x32 size (0-pad pixels)
+    # only apply horizontal flip in 50% of samples, to preserve some unflipped ones
+    augmentations = transforms.Compose([
+                                        transforms.RandomCrop(32, padding=4),
                                         transforms.RandomHorizontalFlip(p=0.5),
                                         ])
-    #augmentations = transforms.Compose([])
-    dataset = datasets.CIFAR10('cifar10', download=True, train=True, transform=transforms.Compose([augmentations, transform]))
-    trainset, valset = torch.utils.data.random_split(dataset, [int(len(dataset)*0.9), len(dataset)-int(len(dataset)*0.9)])
+
+    train_transform = transforms.Compose([
+        augmentations,
+        transforms.ToTensor(),
+        transforms.Normalize(mean=mean, std=std)
+    ])
+
+    eval_transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=mean, std=std)
+    ])
+
+    # Same underlying training data, but separate transforms
+    train_data = datasets.CIFAR10(
+        'cifar10', download=True, train=True,
+        transform=train_transform
+    )
+
+    eval_data = datasets.CIFAR10(
+        'cifar10', download=True, train=True,
+        transform=eval_transform
+    )
+
+    indices = torch.randperm(50000, generator=torch.Generator().manual_seed(args.seed))
+    split = int(0.9 * 50000)
+
+    trainset = Subset(train_data, indices[:split])
+    valset = Subset(eval_data, indices[split:])
+
     trainloader = DataLoader(trainset, batch_size=args.batch_size, shuffle=True)
     valloader = DataLoader(valset, batch_size=args.batch_size, shuffle=False)
 
-    # Download and load the test data
-    # TODO: adjust folder
-    testset = datasets.CIFAR10('cifar10', download=True, train=False, transform=transform)
-    testloader = DataLoader(testset, batch_size=64, shuffle=True)
+    testset = datasets.CIFAR10(
+        'cifar10', download=True, train=False,
+        transform=eval_transform
+    )
+
+    testloader = DataLoader(testset, batch_size=args.batch_size, shuffle=False)
 
     # Build a feed-forward network
     print(f"Using {args.model}")
     if args.model == "r18":
-        model = models.resnet18(weights=None, num_classes=10) # resnet18 is designed for 224x224 inputs, cifar is 32x32
-        model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False) # use 3x kernel with stride 1 instead of 7x kernel with stride 2. keep #feature maps the same
-        model.maxpool = nn.Identity() # dont downscale using max pool
+        model = models.resnet18(weights=None, num_classes=10) 
+
+        # resnet18 is designed for 224x224 inputs, cifar is 32x32
+        # so, we adjust the first two layers
+        # 1) use kernel with stride 1 instead of 2, so 32x32 image keeps its size
+        # 2) omit max pool, to preserve image size (original resnet18 would compress 32x32 to just 1x1)
+        # this achieves a larger representation in deeper layers and prevents losing too much information
+        model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1,
+                                bias=False)  # use 3x kernel with stride 1 instead of 7x kernel with stride 2
+        model.maxpool = nn.Identity()  # dont downscale using max pool
     elif args.model == "vit":
-        model = ViT(image_size = 32, patch_size = 8, num_classes = 10, dim = 64,
-                    depth = 2, heads = 8, mlp_dim = 128, dropout = 0.1,
-                    emb_dropout = 0.1) 
+        model = ViT(image_size=32, patch_size=8, num_classes=10, dim=64,
+                    depth=2, heads=8, mlp_dim=128, dropout=0.1,
+                    emb_dropout=0.1)
     elif args.model == "cvit":
-        model = CrossViT(image_size = 32, num_classes = 10, sm_dim = 64, 
-                         lg_dim = 128, sm_patch_size = 8, sm_enc_depth = 2,
-                         sm_enc_heads = 8, sm_enc_mlp_dim = 128, 
-                         sm_enc_dim_head = 64, lg_patch_size = 16, 
-                         lg_enc_depth = 2, lg_enc_heads = 8, 
-                         lg_enc_mlp_dim = 128, lg_enc_dim_head = 64,
-                         cross_attn_depth = 2, cross_attn_heads = 8,
-                         cross_attn_dim_head = 64, depth = 3, dropout = 0.1,
-                         emb_dropout = 0.1)
+        model = CrossViT(image_size=32, num_classes=10, sm_dim=64,
+                         lg_dim=128, sm_patch_size=8, sm_enc_depth=2,
+                         sm_enc_heads=8, sm_enc_mlp_dim=128,
+                         sm_enc_dim_head=64, lg_patch_size=16,
+                         lg_enc_depth=2, lg_enc_heads=8,
+                         lg_enc_mlp_dim=128, lg_enc_dim_head=64,
+                         cross_attn_depth=2, cross_attn_heads=8,
+                         cross_attn_dim_head=64, depth=3, dropout=0.1,
+                         emb_dropout=0.1)
 
     # Define the loss
-    criterion = nn.CrossEntropyLoss(reduction="sum")
+    criterion = nn.CrossEntropyLoss()
 
     def get_device():
         if torch.cuda.is_available():
             print("using cuda")
             return torch.device("cuda")
-        try:
-            import torch_directml
-            if torch_directml.is_available():
-                print("using directml")
-                return torch_directml.device()
-        except ImportError:
-            pass
         print("using cpu")
         return torch.device("cpu")
-    
-    device = get_device()    
+
+    device = get_device()
     model.to(device)
-    
-    #optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
+
+    optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
 
     # trying different optimizer
-    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
+    # optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
 
     if args.model == "r18":
         scheduler = optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.01, total_iters=args.epochs)
@@ -148,7 +177,7 @@ def run(args):
             print(f"new model with best val loss: {val_loss}")
             if args.save_model:
                 print("saving new best model weights")
-                WEIGHTS_SAVE_DIR="weights"
+                WEIGHTS_SAVE_DIR = "weights"
 
                 if not os.path.isdir(WEIGHTS_SAVE_DIR):
                     os.mkdir(WEIGHTS_SAVE_DIR)
@@ -156,6 +185,7 @@ def run(args):
                 torch.save(model.state_dict(), f"{WEIGHTS_SAVE_DIR}/{args.model}_ep{args.epochs}.pt")
 
     test(model, device, testloader, criterion)
+
 
 if __name__ == '__main__':
     args = parse_args()
