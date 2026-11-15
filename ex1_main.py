@@ -135,6 +135,7 @@ def run(args):
         scheduler = optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.01, total_iters=args.epochs)
 
     best_val_los = None
+
     for epoch in range(1, args.epochs + 1):
         train(model, trainloader, optimizer, criterion, device, epoch)
         val_loss = test(model, device, valloader, criterion, set="Validation")
@@ -153,7 +154,6 @@ def run(args):
                     os.mkdir(WEIGHTS_SAVE_DIR)
 
                 torch.save(model.state_dict(), f"{WEIGHTS_SAVE_DIR}/{args.model}_ep{args.epochs}.pt")
-
 
     test(model, device, testloader, criterion)
 

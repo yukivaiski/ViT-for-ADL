@@ -13,6 +13,8 @@ def pair(t):
 
 # ViT & CrossViT
 # PreNorm class for layer normalization before passing the input to another function (fn)
+# stabilizes the variance of the activations, the features have a mean of 0 and variance of 1
+# all layers receive well-scaled inputs (avoids vanishing or exploding gradients)
 class PreNorm(nn.Module):
     def __init__(self, dim, fn):
         super().__init__()
@@ -145,8 +147,11 @@ class ProjectInOut(nn.Module):
 
     def forward(self, x, *args, **kwargs):
 
+        # transforms input tensor from outer to inner dim
         x = self.project_in(x)
+        # execute whatever function we want (PreNorm with Attention)
         x = self.fn(x, *args, **kwargs)
+        # project the output to the outer dim
         x = self.project_out(x)
 
         return x
@@ -154,6 +159,9 @@ class ProjectInOut(nn.Module):
 
 # CrossViT
 # cross attention transformer
+# We do cross attention only on the CLS tokens of each branch (i.e. the smaller and larger patches)
+# Since the CLS tokens act as a sort of summary of the branch, we update the smaller cls with information
+# from the larger branch and vice-versa
 class CrossTransformer(nn.Module):
 
     def __init__(self, sm_dim, lg_dim, depth, heads, dropout):
@@ -164,7 +172,7 @@ class CrossTransformer(nn.Module):
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
 
-                # Small CLS -> large embedding space
+                # to project small class token to large embedding space
                 ProjectInOut(
                     sm_dim,
                     lg_dim,
@@ -179,7 +187,7 @@ class CrossTransformer(nn.Module):
                     )
                 ),
 
-                # Large CLS -> small embedding space
+                # to project large class token to small embedding space
                 ProjectInOut(
                     lg_dim,
                     sm_dim,
@@ -229,6 +237,8 @@ class CrossTransformer(nn.Module):
 
 # CrossViT
 # multi-scale encoder
+# Manages the pipeline by alternating between independent self-attention (standard transformer block) and
+# cross attention (via the CrossTransformer)
 class MultiScaleEncoder(nn.Module):
     def __init__(
             self,
@@ -247,10 +257,11 @@ class MultiScaleEncoder(nn.Module):
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
+                # 1. Transformer encoder for the smaller branch
                 Transformer(dim=sm_dim, **sm_enc_params, dropout=dropout),
-                # 2. Large branch transformer encoder
+                # 2. Transformer encoder for the larger branch
                 Transformer(dim=lg_dim, **lg_enc_params, dropout=dropout),
-                # 3. Cross-transformer block for communication
+                # 3. Cross-transformer block for communication between them both
                 CrossTransformer(
                     sm_dim=sm_dim,
                     lg_dim=lg_dim,
@@ -263,10 +274,11 @@ class MultiScaleEncoder(nn.Module):
     def forward(self, sm_tokens, lg_tokens):
         for sm_enc, lg_enc, cross_attn in self.layers:
             # Independent self-attention refinement
+            # So we get the updated tokens for small and large branch from their transformers respectively
             sm_tokens = sm_enc(sm_tokens)
             lg_tokens = lg_enc(lg_tokens)
 
-            # Cross-scale communication (sharing information between [CLS] tokens and patches)
+            # And now, we update these tokens with cross attention via the CrossTransformer
             sm_tokens, lg_tokens = cross_attn(sm_tokens, lg_tokens)
         return sm_tokens, lg_tokens
 
@@ -297,6 +309,8 @@ class ImageEmbedder(nn.Module):
         # and embeds them with layer norm + linear projection + layer norm
         self.to_patch_embedding = nn.Sequential(
             # taken directly from the VIT
+            # here the image is chopped into non-overlapping patches and flattened into one 1D vector
+            # b - batch size, c - channels, h - splitting the image into h patches of size p1 and so on
             Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=patch_height, p2=patch_width),
             nn.LayerNorm(patch_dim),
             nn.Linear(patch_dim, dim),
@@ -311,10 +325,14 @@ class ImageEmbedder(nn.Module):
 
     def forward(self, img):
         # forward through patch embedding layer
+        # taken from the ViT module directly
+        # since the embedding happens here instead of the CrossVit class, we return the calculated embeddings
         x = self.to_patch_embedding(img)
         b, n, _ = x.shape
-        # concat class tokens
+        # take a single cls token and duplicate it across the batch dim so that every image gets its own
+        # b - batch size, d - dim
         cls_tokens = repeat(self.cls_token, '1 1 d -> b 1 d', b=b)
+        # concat class tokens
         x = torch.cat((cls_tokens, x), dim=1)
         # add positional embedding
         x += self.pos_embedding[:, :(n + 1)]
@@ -413,12 +431,12 @@ class CrossViT(nn.Module):
             emb_dropout=0.1
     ):
         super().__init__()
-        # create ImageEmbedder for small and large patches
+        # Created the ImageEmbedder for small and large patches
         self.small_embedder = ImageEmbedder(dim=sm_dim, image_size=image_size,
                                             patch_size=sm_patch_size, dropout=dropout)
         self.large_embedder = ImageEmbedder(dim=lg_dim, patch_size=lg_patch_size,
                                             image_size=image_size, dropout=dropout)
-        # create MultiScaleEncoder
+        # Created the MultiScaleEncoder
         self.multi_scale_encoder = MultiScaleEncoder(
             depth=depth,
             sm_dim=sm_dim,
@@ -441,19 +459,19 @@ class CrossViT(nn.Module):
             dropout=dropout
         )
 
-        # create mlp heads for small and large patches
+        # Created mlp heads for small and large patches
         self.sm_mlp_head = nn.Sequential(nn.LayerNorm(sm_dim), nn.Linear(sm_dim, num_classes))
         self.lg_mlp_head = nn.Sequential(nn.LayerNorm(lg_dim), nn.Linear(lg_dim, num_classes))
 
         self.dropout = nn.Dropout(emb_dropout)
 
     def forward(self, img):
-        # apply image embedders
+        # Applied image embedders
         sm_embed = self.small_embedder.forward(img)
         lg_embed = self.large_embedder.forward(img)
         # and the multi-scale encoder
         sm_tokens, lg_tokens = self.multi_scale_encoder.forward(sm_embed, lg_embed)
-        # call the mlp heads w. the class tokens
+        # calling the mlp heads w. the class tokens
         sm_cls = sm_tokens[:, 0]
         lg_cls = lg_tokens[:, 0]
         sm_logits = self.sm_mlp_head(sm_cls)
