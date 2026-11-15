@@ -69,20 +69,12 @@ def run(args):
     mean = (0.4914, 0.4822, 0.4465)
     std = (0.2470, 0.2435, 0.2616)
 
-    # Download and load the training data
-    transform = transforms.Compose([transforms.ToTensor(),
-                                    # ImageNet mean/std values should also fit okayish for CIFAR
-                                    transforms.Normalize(mean=mean, std=std)
-                                    ])
-
-    # TODO: adjust folder
     augmentations = transforms.Compose([transforms.RandomCrop(32, padding=4),
                                         transforms.RandomHorizontalFlip(p=0.5),
                                         ])
 
     train_transform = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(p=0.5),
+        augmentations,
         transforms.ToTensor(),
         transforms.Normalize(mean=mean, std=std)
     ])
@@ -148,13 +140,6 @@ def run(args):
         if torch.cuda.is_available():
             print("using cuda")
             return torch.device("cuda")
-        try:
-            import torch_directml
-            if torch_directml.is_available():
-                print("using directml")
-                return torch_directml.device()
-        except ImportError:
-            pass
         print("using cpu")
         return torch.device("cpu")
 
