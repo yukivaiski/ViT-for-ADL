@@ -69,7 +69,10 @@ def run(args):
     mean = (0.4914, 0.4822, 0.4465)
     std = (0.2470, 0.2435, 0.2616)
 
-    augmentations = transforms.Compose([transforms.RandomCrop(32, padding=4),
+    # use random crop with padding, so ouput image is still 32x32 size (0-pad pixels)
+    # only apply horizontal flip in 50% of samples, to preserve some unflipped ones
+    augmentations = transforms.Compose([
+                                        transforms.RandomCrop(32, padding=4),
                                         transforms.RandomHorizontalFlip(p=0.5),
                                         ])
 
@@ -114,9 +117,15 @@ def run(args):
     # Build a feed-forward network
     print(f"Using {args.model}")
     if args.model == "r18":
-        model = models.resnet18(weights=None, num_classes=10)  # resnet18 is designed for 224x224 inputs, cifar is 32x32
+        model = models.resnet18(weights=None, num_classes=10) 
+
+        # resnet18 is designed for 224x224 inputs, cifar is 32x32
+        # so, we adjust the first two layers
+        # 1) use kernel with stride 1 instead of 2, so 32x32 image keeps its size
+        # 2) omit max pool, to preserve image size (original resnet18 would compress 32x32 to just 1x1)
+        # this achieves a larger representation in deeper layers and prevents losing too much information
         model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1,
-                                bias=False)  # use 3x kernel with stride 1 instead of 7x kernel with stride 2. keep #feature maps the same
+                                bias=False)  # use 3x kernel with stride 1 instead of 7x kernel with stride 2
         model.maxpool = nn.Identity()  # dont downscale using max pool
     elif args.model == "vit":
         model = ViT(image_size=32, patch_size=8, num_classes=10, dim=64,
@@ -146,10 +155,10 @@ def run(args):
     device = get_device()
     model.to(device)
 
-    # optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
+    optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
 
     # trying different optimizer
-    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
+    # optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
 
     if args.model == "r18":
         scheduler = optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.01, total_iters=args.epochs)
