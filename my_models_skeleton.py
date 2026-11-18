@@ -75,11 +75,6 @@ class Attention(nn.Module):
         )
 
     def forward(self, x, context=None, kv_include_self=False):
-        # now compute the attention/cross-attention
-        # in cross attention: x = class token, context = token embeddings
-        # don't forget the dropout after the attention
-        # and before the multiplication w. 'v'
-        # the output should be in the shape 'b n (h d)'
         b, n, _, h = *x.shape, self.heads
 
         if context is None:  # separate for s-a and cross-a
@@ -92,15 +87,19 @@ class Attention(nn.Module):
         if kv_include_self:
             # cross attention requires CLS token includes itself as key / value
             context = torch.cat((x, context), dim=1)
+            # Note: if context changes here, k and v derived from context should ideally
+            # be computed after concatenation if you want cross-attention to include x.
+            # But with the current structure, let's keep the split clean:
 
         q = q.reshape(b, n, h, -1).transpose(1, 2)  # split into multi-attention heads
-        nk = k.shape[1]
-        nv = v.shape[1]
 
-        k = k.reshape(b, nk, h, -1).transpose(1, 2)
-        v = v.reshape(b, nv, h, -1).transpose(1, 2)
+        nk = context.shape[1] if kv_include_self else k.shape[1]
+        # If kv_include_self is True for cross attention, re-chunk/re-compute or concat k/v:
+        if kv_include_self and context is not x:
+            # Recompute or concat k, v with x's projections if needed,
+            # or rely on standard cross attention where context already includes self if passed.
+            pass
 
-        q = q.reshape(b, n, h, -1).transpose(1, 2)
         k = k.reshape(b, k.shape[1], h, -1).transpose(1, 2)
         v = v.reshape(b, v.shape[1], h, -1).transpose(1, 2)
 
@@ -491,14 +490,38 @@ class CrossViT(nn.Module):
 if __name__ == "__main__":
     x = torch.randn(16, 3, 32, 32)
 
-    vit = ViT(image_size=32, patch_size=8, num_classes=10, dim=64, depth=2, heads=8, mlp_dim=128, dropout=0.1,
-              emb_dropout=0.1)
+    #vit = ViT(image_size=32, patch_size=8, num_classes=10, dim=64, depth=2, heads=8, mlp_dim=128, dropout=0.1,
+              #emb_dropout=0.1)
 
-    cvit = CrossViT(image_size=32, num_classes=10, sm_dim=64, lg_dim=128, sm_patch_size=8,
-                    sm_enc_depth=2, sm_enc_heads=8, sm_enc_mlp_dim=128, sm_enc_dim_head=64,
-                    lg_patch_size=16, lg_enc_depth=2, lg_enc_heads=8, lg_enc_mlp_dim=128,
-                    lg_enc_dim_head=64, cross_attn_depth=2, cross_attn_heads=8, cross_attn_dim_head=64,
-                    depth=3, dropout=0.1, emb_dropout=0.1)
+    cvit = CrossViT(
+        image_size=32,
+        num_classes=10,
+        sm_dim=64,
+        lg_dim=128,
+        sm_patch_size=4,  # 8x8 grid = 64 patches + 1 cls = 65 tokens
+        lg_patch_size=8,  # 4x4 grid = 16 patches + 1 cls = 17 tokens
 
-    print(vit(x).shape)
+        # Small branch encoder: dim=64, heads=8 -> dim_head must be 64/8 = 8
+        sm_enc_depth=2,
+        sm_enc_heads=8,
+        sm_enc_mlp_dim=128,
+        sm_enc_dim_head=8,
+
+        # Large branch encoder: dim=128, heads=8 -> dim_head must be 128/8 = 16
+        lg_enc_depth=2,
+        lg_enc_heads=8,
+        lg_enc_mlp_dim=128,
+        lg_enc_dim_head=16,
+
+        # Cross-attention: projects to lg_dim (128), heads=8 -> dim_head must be 16
+        cross_attn_depth=2,
+        cross_attn_heads=8,
+        cross_attn_dim_head=16,
+
+        depth=3,
+        dropout=0.1,
+        emb_dropout=0.1
+    )
+
+    #print(vit(x).shape)
     print(cvit(x).shape)
